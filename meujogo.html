@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Battle Royale - 30 NPCs + Cura</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a2e15; font-family: sans-serif; }
+        #ui { position: absolute; top: 15px; left: 15px; color: white; pointer-events: none; text-shadow: 2px 2px 4px black; z-index: 10; }
+        #fim-de-jogo { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; display: none; z-index: 20; background: rgba(0,0,0,0.9); padding: 30px; border-radius: 15px; border: 2px solid #2ecc71;
+        }
+        #mensagem { color: #f1c40f; font-size: 50px; font-weight: bold; margin-bottom: 20px; }
+        button { padding: 15px 30px; font-size: 20px; cursor: pointer; background: #27ae60; color: white; border: none; border-radius: 8px; }
+        #life-container { width: 250px; height: 20px; background: #333; border: 2px solid white; margin-top: 5px; border-radius: 5px; overflow: hidden; }
+        #life-bar { width: 100%; height: 100%; background: #00aaff; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <b style="font-size: 22px;">ARENA DE SOBREVIVÊNCIA</b><br>
+        Vivos: <span id="countTotal">30</span> | Abates: <span id="kills">0</span><br>
+        <div id="life-container"><div id="life-bar"></div></div>
+        <small>SUA VIDA (PEGUE AS ESFERAS VERDES PARA CURAR)</small>
+    </div>
+
+    <div id="fim-de-jogo">
+        <div id="mensagem">VITÓRIA!</div>
+        <button onclick="location.reload()">REINICIAR</button>
+    </div>
+
+<script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+    const TAMANHO_MAPA = 130; 
+    let raioZona = TAMANHO_MAPA / 1.6;
+    let jogoAtivo = true;
+    let kills = 0;
+    let npcs = [], balas = [], kits = [];
+    const teclas = {};
+    let lastPlayerShot = 0;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a2e15);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0x707070));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(50, 80, 50);
+    sun.castShadow = true;
+    scene.add(sun);
+
+    // Chão
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(TAMANHO_MAPA, TAMANHO_MAPA), new THREE.MeshStandardMaterial({ color: 0x223311 }));
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Zona Segura
+    const zonaMat = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
+    let circuloZona = new THREE.Mesh(new THREE.RingGeometry(raioZona, raioZona + 3, 64), zonaMat);
+    circuloZona.rotation.x = -Math.PI / 2;
+    circuloZona.position.y = 0.2;
+    scene.add(circuloZona);
+
+    // Player
+    const player = new THREE.Mesh(new THREE.SphereGeometry(0.7, 32, 32), new THREE.MeshStandardMaterial({ color: 0x00aaff }));
+    player.position.set(0, 0.7, 40);
+    player.userData = { vida: 100, faction: 'PLAYER', cadencia: 500 };
+    scene.add(player);
+
+    // Função para criar Regeneradores de Vida
+    function spawnKits() {
+        for(let i=0; i<15; i++) {
+            const kit = new THREE.Mesh(
+                new THREE.SphereGeometry(0.5, 16, 16), 
+                new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.5 })
+            );
+            kit.position.set((Math.random()-0.5)*110, 0.5, (Math.random()-0.5)*110);
+            scene.add(kit);
+            kits.push(kit);
+        }
+    }
+
+    function spawn30Inimigos() {
+        const cores = [0xe74c3c, 0xf1c40f, 0x9b59b6, 0xe67e22];
+        for(let i=0; i<30; i++) {
+            const g = new THREE.Group();
+            const cor = cores[i % cores.length];
+            const corpo = new THREE.Mesh(new THREE.SphereGeometry(0.7, 32, 32), new THREE.MeshStandardMaterial({ color: cor }));
+            const barra = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.15), new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+            barra.position.y = 1.3;
+            g.add(corpo); g.add(barra);
+            g.position.set((Math.random()-0.5)*110, 0.7, (Math.random()-0.5)*110);
+            g.userData = { vida: 100, barra: barra, lastShot: 0, faction: 'ENEMY_'+i, bulletColor: cor };
+            scene.add(g);
+            npcs.push(g);
+        }
+    }
+
+    function atirar(pos, dir, cor, owner) {
+        const b = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), new THREE.MeshBasicMaterial({ color: cor }));
+        b.position.copy(pos);
+        b.userData = { velocity: dir.multiplyScalar(0.75), owner: owner };
+        scene.add(b);
+        balas.push(b);
+    }
+
+    window.onkeydown = (e) => { teclas[e.key.toLowerCase()] = true; };
+    window.onkeyup = (e) => teclas[e.key.toLowerCase()] = false;
+
+    function animate(time) {
+        if(!jogoAtivo) return;
+        requestAnimationFrame(animate);
+
+        // Zona encolhendo
+        if (raioZona > 2) {
+            raioZona -= 0.02;
+            circuloZona.geometry.dispose();
+            circuloZona.geometry = new THREE.RingGeometry(raioZona, raioZona + 1, 64);
+        }
+
+        // Movimento Player
+        const speed = 0.28;
+        if (teclas['w']) player.position.z -= speed;
+        if (teclas['s']) player.position.z += speed;
+        if (teclas['a']) player.position.x -= speed;
+        if (teclas['d']) player.position.x += speed;
+
+        // Player pegando cura
+        kits.forEach((kit, index) => {
+            if(player.position.distanceTo(kit.position) < 1.5) {
+                player.userData.vida = Math.min(100, player.userData.vida + 30);
+                document.getElementById('life-bar').style.width = player.userData.vida + "%";
+                scene.remove(kit);
+                kits.splice(index, 1);
+            }
+        });
+
+        if (teclas[' '] && time - lastPlayerShot > player.userData.cadencia) {
+            atirar(player.position, new THREE.Vector3(0,0,-1), 0x00ffff, 'PLAYER');
+            lastPlayerShot = time;
+        }
+
+        camera.position.lerp(new THREE.Vector3(player.position.x, 35, player.position.z + 30), 0.1);
+        camera.lookAt(player.position);
+
+        // IA NPCs
+        npcs.forEach(npc => {
+            npc.lookAt(camera.position);
+            
+            // Se o NPC estiver muito ferido, ele procura cura
+            let alvoCura = null;
+            if(npc.userData.vida < 50 && kits.length > 0) {
+                let dCuraMin = Infinity;
+                kits.forEach(k => {
+                    let d = npc.position.distanceTo(k.position);
+                    if(d < dCuraMin) { dCuraMin = d; alvoCura = k; }
+                });
+            }
+
+            if(alvoCura) {
+                const dirCura = new THREE.Vector3().subVectors(alvoCura.position, npc.position).normalize();
+                npc.position.add(dirCura.multiplyScalar(0.15));
+                if(npc.position.distanceTo(alvoCura.position) < 1) {
+                    npc.userData.vida = Math.min(100, npc.userData.vida + 30);
+                    npc.userData.barra.scale.x = npc.userData.vida/100;
+                    scene.remove(alvoCura);
+                    kits.splice(kits.indexOf(alvoCura), 1);
+                }
+            } else {
+                // Lógica normal de ataque
+                let alvoPerto = null;
+                let dMin = Infinity;
+                [player, ...npcs].forEach(alvo => {
+                    if(alvo !== npc && alvo.userData.faction !== npc.userData.faction) {
+                        let d = npc.position.distanceTo(alvo.position);
+                        if(d < dMin) { dMin = d; alvoPerto = alvo; }
+                    }
+                });
+                if(alvoPerto) {
+                    const dir = new THREE.Vector3().subVectors(alvoPerto.position, npc.position).normalize();
+                    if (dMin > 12) npc.position.add(dir.multiplyScalar(0.12));
+                    if (dMin < 22 && time - npc.userData.lastShot > 1800) {
+                        atirar(npc.position, dir.clone(), npc.userData.bulletColor, npc.userData.faction);
+                        npc.userData.lastShot = time;
+                    }
+                }
+            }
+
+            // Dano de zona
+            if (new THREE.Vector2(npc.position.x, npc.position.z).length() > raioZona && Math.random() < 0.02) {
+                npc.userData.vida -= 1;
+                npc.userData.barra.scale.x = Math.max(0, npc.userData.vida/100);
+                if(npc.userData.vida <= 0) { scene.remove(npc); npcs.splice(npcs.indexOf(npc), 1); }
+            }
+        });
+
+        // Balas e Dano
+        for (let i = balas.length - 1; i >= 0; i--) {
+            const b = balas[i]; b.position.add(b.userData.velocity);
+            [player, ...npcs].forEach((alvo) => {
+                if (b.userData.owner !== alvo.userData.faction && b.position.distanceTo(alvo.position) < 1) {
+                    alvo.userData.vida -= 25;
+                    if(alvo === player) {
+                        document.getElementById('life-bar').style.width = alvo.userData.vida + "%";
+                        if(alvo.userData.vida <= 0) { 
+                            document.getElementById('mensagem').innerText = "DERROTADO!"; 
+                            document.getElementById('fim-de-jogo').style.display = 'block'; jogoAtivo = false; 
+                        }
+                    } else {
+                        alvo.userData.barra.scale.x = Math.max(0, alvo.userData.vida/100);
+                        if (alvo.userData.vida <= 0) {
+                            if(b.userData.owner === 'PLAYER') { kills++; document.getElementById('kills').innerText = kills; }
+                            scene.remove(alvo); npcs.splice(npcs.indexOf(alvo), 1);
+                        }
+                    }
+                    scene.remove(b); balas.splice(i, 1);
+                }
+            });
+        }
+
+        document.getElementById('countTotal').innerText = npcs.length;
+        if(npcs.length === 0 && player.userData.vida > 0) { 
+            document.getElementById('mensagem').innerText = "🏆 CAMPEÃO! 🏆";
+            document.getElementById('fim-de-jogo').style.display = 'block'; jogoAtivo = false; 
+        }
+        renderer.render(scene, camera);
+    }
+    spawn30Inimigos();
+    spawnKits();
+    animate(0);
+</script>
+</body>
+</html>
